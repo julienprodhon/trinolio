@@ -1,0 +1,73 @@
+name: Publish
+
+# Tag driven, so the release is whatever `git push origin vYY.M` pointed at. The tag and
+# `version` in pyproject.toml are not derived from each other, and the check below is what stops
+# them drifting: a mismatch fails before anything reaches PyPI, where a version is permanent.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Tag matches the packaged version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          packaged=$(uv run --no-project python -c \
+            'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          echo "tag $tagged, pyproject $packaged"
+          [ "$tagged" = "$packaged" ]
+
+      - run: uv sync --locked
+      - run: uv run pytest
+
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there is no API token
+    # to store or rotate. Configure the publisher on PyPI first, see CONTRIBUTING.md.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # After PyPI rather than beside it, so a GitHub release never claims a version that failed to
+  # upload. GitHub Packages has no Python registry, so this is the release, not a second one.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        # `gh` is preinstalled on the runner, so this needs no third party action and no
+        # checkout: `--repo` is what lets it skip one.
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "$GITHUB_REF_NAME"
+          --generate-notes
+          --verify-tag

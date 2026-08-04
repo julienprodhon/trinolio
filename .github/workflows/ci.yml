@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      # The gate CONTRIBUTING.md documents, in the order it documents it. `--check` rather than
+      # a rewrite: CI reports, it does not edit.
+      - run: uv run ruff format --check
+      - run: uv run ruff check
+      - run: uv run ty check
+      - run: uv run pytest
+
+      # No network in the suite, so a failure here is real rather than Nolio being down.
+      - run: uv run vulture
