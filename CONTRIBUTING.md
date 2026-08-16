@@ -42,10 +42,13 @@ release carrying the same sdist and wheel. The version check runs before any upl
 version on PyPI is permanent: it can be yanked, never replaced, and never re-uploaded under the
 same number. The release comes last so it can never advertise a version PyPI rejected.
 
-Publishing uses PyPI trusted publishing, so there is no API token anywhere in this repo. It needs
-a one-time setup on PyPI: add a pending publisher for the `trinolio` project pointing at this
-repository, the workflow filename `publish.yml`, and the environment name `pypi`. The
-`environment: pypi` line in the workflow has to match whatever is registered there.
+Publishing uses PyPI trusted publishing, so there is no API token anywhere in this repo. That is
+configured and needs nothing further: the publisher on PyPI points at this repository, the
+workflow filename `publish.yml`, and the environment name `pypi`. All three are matched against
+the OIDC token at upload time, so renaming any of them, including the `environment: pypi` line in
+the workflow, breaks publishing until PyPI is updated to match.
+
+`26.8` was the first release, published 2026-08-08.
 
 ## Tests
 

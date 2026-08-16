@@ -37,6 +37,10 @@ WELLNESS = DATA / "wellness.parquet"
 # Wide enough for two uploads of one ride disagree by, short enough that a brick falls outside
 DUPLICATE_WINDOW = timedelta(minutes=5)
 
+# Two recordings of one session agree on duration and distance to within 2%. Different sessions
+# sharing a rewritten start time are 19% apart or more, so 5% sits in an empty gap.
+DUPLICATE_TOLERANCE = 0.05
+
 # Dates arrive as strings and are parsed once the frame is built. `file_url` is deliberately
 # absent: it is a CDN link that expires within the hour
 TRAININGS_RAW = pl.Schema(
@@ -176,16 +180,35 @@ def write(path: Path, frame: pl.DataFrame) -> None:
     temporary.replace(path)
 
 
-def duplicate_candidates(path: Path, window: timedelta = DUPLICATE_WINDOW) -> pl.DataFrame:
-    """Consecutive workouts of one sport starting within `window` of each other, for review.
+def agrees_within(column: str, previous: str, tolerance: float) -> pl.Expr:
+    """Whether the two columns are within `tolerance` of each other, relatively.
+
+    True when either is null, since a pair that cannot be compared still wants a human, and
+    when both are zero, which is how Nolio stores distance for the sports that have none.
+    """
+    larger = pl.max_horizontal(column, previous)
+    return ((pl.col(column) - pl.col(previous)).abs() / larger <= tolerance).fill_null(True) | (
+        larger == 0
+    )
+
+
+def duplicate_candidates(
+    path: Path, window: timedelta = DUPLICATE_WINDOW, tolerance: float = DUPLICATE_TOLERANCE
+) -> pl.DataFrame:
+    """Consecutive workouts of one sport starting within `window` of each other and agreeing
+    on duration and distance to within `tolerance`, for review.
 
     Reported, never merged: a brick session and the legs of a multisport race have that same
     shape, so telling them from a double upload needs a human.
+
+    The start time alone is not enough. Nolio rewrites it on a hand upload, hour included, so
+    everything imported that way clusters on times it never had and unrelated sessions collide.
+    Duration and distance come from the file and survive, which is what separates them.
     """
     # A start-time window rather than (date, duration, sport), which cannot see the known miss
     # by construction, an indoor ride recorded twice a minute apart, and finds nothing at all
     # on this archive.
-    columns = ["nolio_id", "name", "sport_id", "start_local", "duration"]
+    columns = ["nolio_id", "name", "sport_id", "start_local", "duration", "distance"]
     stored = (
         pl.read_parquet(path, columns=columns)
         .filter(pl.col("start_local").is_not_null())
@@ -199,8 +222,13 @@ def duplicate_candidates(path: Path, window: timedelta = DUPLICATE_WINDOW) -> pl
             previous_name=pl.col("name").shift().over("sport_id"),
             previous_start=pl.col("start_local").shift().over("sport_id"),
             previous_duration=pl.col("duration").shift().over("sport_id"),
+            previous_distance=pl.col("distance").shift().over("sport_id"),
         )
-        .filter(pl.col("start_local") - pl.col("previous_start") < window)
+        .filter(
+            pl.col("start_local") - pl.col("previous_start") < window,
+            agrees_within("duration", "previous_duration", tolerance),
+            agrees_within("distance", "previous_distance", tolerance),
+        )
         .select(
             "sport_id",
             "previous_id",

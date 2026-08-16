@@ -54,9 +54,10 @@ def sync(
     on `nolio_id`, so re-running is idempotent; a workout deleted in Nolio only disappears on
     `--full`.
 
-    It also reports workouts of the same sport starting within five minutes of each other, the
-    shape Nolio's own deduplication misses. They are only ever reported: a brick session looks
-    identical from here, so merging is a judgement call for a human.
+    It also reports workouts of the same sport that start within five minutes of each other and
+    agree on duration and distance, the shape Nolio's own deduplication misses. They are only
+    ever reported: a brick session looks identical from here, so merging is a judgement call for
+    a human.
     """
     if full:
         since = None
@@ -84,22 +85,6 @@ def sync(
         print(
             f"  warning: {', '.join(capped)} hit the {metrics.LIMIT} row cap, sync a shorter range"
         )
-
-    # Over the whole table rather than the synced window: a duplicate arrives when its second
-    # copy does, which can be any number of syncs after the first.
-    pairs = store.duplicate_candidates(store.TRAININGS)
-    if pairs.height:
-        print(
-            f"  warning: {pairs.height} pairs start within {store.DUPLICATE_WINDOW} of each other"
-        )
-        for row in pairs.iter_rows(named=True):
-            first, second = row["previous_start"], row["start_local"]
-            print(
-                f"    {first:%Y-%m-%d %H:%M:%S} +{(second - first).seconds:>4}s  "
-                f"{row['previous_id']} ({row['previous_duration']}s) "
-                f"vs {row['nolio_id']} ({row['duration']}s)  {row['name']}"
-            )
-        print("    review them by hand: bricks and race legs look the same from here")
 
 
 @app.command()

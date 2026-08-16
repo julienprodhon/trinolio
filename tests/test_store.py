@@ -201,3 +201,50 @@ def test_duplicate_window_is_honoured_when_given() -> None:
     )
 
     assert store.duplicate_candidates(store.TRAININGS, timedelta(minutes=30)).height == 1
+
+
+def test_duplicate_candidates_ignores_two_sessions_sharing_a_rewritten_start() -> None:
+    """Nolio rewrites the start time on a hand upload, hour included, so the Zwift rides
+    imported that way all claim the same minute. Duration and distance come from the file."""
+    store.write(
+        store.TRAININGS,
+        store.trainings_frame(
+            [
+                training(nolio_id=1, sport_id=18, duration=4568, distance=37.995),
+                training(nolio_id=2, sport_id=18, duration=2490, distance=18.87),
+            ]
+        ),
+    )
+
+    assert store.duplicate_candidates(store.TRAININGS).height == 0
+
+
+def test_duplicate_candidates_flags_one_ride_recorded_by_two_devices() -> None:
+    """The real shape: a race bike leg held by the watch and by the Edge, agreeing on what
+    the ride was to within a rounding error."""
+    store.write(
+        store.TRAININGS,
+        store.trainings_frame(
+            [
+                training(nolio_id=1, sport_id=14, duration=8935, distance=79.421),
+                training(nolio_id=2, sport_id=14, duration=8886, distance=78.903),
+            ]
+        ),
+    )
+
+    assert store.duplicate_candidates(store.TRAININGS).height == 1
+
+
+def test_duplicate_candidates_flags_a_sport_that_records_no_distance() -> None:
+    """Climbing logs 0 km, so a zero distance is agreement and not a missing comparison."""
+    store.write(
+        store.TRAININGS,
+        store.trainings_frame(
+            [
+                training(nolio_id=1, sport_id=31, duration=3600, distance=0.0),
+                training(nolio_id=2, sport_id=31, duration=3605, distance=0.0),
+            ]
+        ),
+    )
+
+    assert store.duplicate_candidates(store.TRAININGS).height == 1

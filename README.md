@@ -8,17 +8,20 @@ Reading is the whole point. The exceptions are the two backfills, which exist be
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/), for development
 - A Nolio account and a developer app from https://www.nolio.io/developers/, which gives you a `client_id` and `client_secret`.
 
 ## Setup
 
-Not on PyPI yet, so install from a checkout:
+```sh
+uv add trinolio      # or pip install trinolio
+```
+
+From a checkout instead, for development:
 
 ```sh
-uv sync          # in this directory, for development
-uv pip install . # or into an environment of your own
+uv sync
 ```
 
 Create a `.env` with your credentials. It can live in this directory or in any parent, which is where the rotating tokens get written too:
