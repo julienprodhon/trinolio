@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import polars as pl
@@ -14,7 +15,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
-from trinolio import auth, metrics, push, store, upload
+from trinolio import auth, files, metrics, push, store, upload
 from trinolio.trainings import fetch_trainings
 from trinolio.wellness import read_archive
 
@@ -63,6 +64,9 @@ def sync(
     changed. A stored workout inside the window that Nolio no longer returns was deleted there,
     and is dropped and listed; `--full` does the same over the whole history.
 
+    Each listed workout's original file is downloaded into `data/files/` once, resuming where an
+    interrupted run stopped.
+
     It also reports workouts of the same sport that start within five minutes of each other and
     agree on duration and distance, the shape Nolio's own deduplication misses. They are only
     ever reported: a brick session looks identical from here, so merging is a judgement call for
@@ -93,6 +97,8 @@ def sync(
         "date_start", "nolio_id", "name"
     ).iter_rows():
         console.print(f"    [red]deleted in Nolio[/] {day}  {nolio_id}  {escape(name or '')}")
+    files.forget(trainings.removed["nolio_id"])
+    _download_files(workouts)
 
     # Not mirrored: the per-type row cap truncates silently, so a missing metric may just be
     # one the response had no room for.
@@ -107,6 +113,40 @@ def sync(
             f"  [yellow]warning[/] {', '.join(capped)} hit the {metrics.LIMIT} row cap,"
             " sync a shorter range"
         )
+
+
+def _download_files(workouts: list[dict[str, Any]]) -> None:
+    """Fetch the original file of every workout in this sync that has none on disk yet."""
+    # Only the workouts this sync listed, since a `file_url` expires within the hour. Files for
+    # older workouts come from a `--full` sync.
+    pending = files.missing(workouts)
+    fileless = sum(not workout.get("file_url") for workout in workouts)
+    note = f"  [dim]{fileless} without a file in Nolio[/]" if fileless else ""
+    if not pending:
+        console.print(f"  {'files':<10} [dim]up to date[/]{note}")
+        return
+
+    done = 0
+    try:
+        with httpx.Client(timeout=60, follow_redirects=True) as client, _progress() as progress:
+            task = progress.add_task("", total=len(pending))
+            for workout in pending:
+                if done:
+                    time.sleep(files.INTERVAL)
+                path = files.download(workout, client)
+                done += 1
+                progress.update(task, advance=1, description=path.name)
+    except KeyboardInterrupt:
+        console.print(f"  [yellow]stopped[/] at {done}/{len(pending)} files, rerun to resume")
+        raise typer.Exit(130) from None
+    except httpx.HTTPStatusError as error:
+        # The links expire within the hour, so a long backfill can outlive the listing it read.
+        console.print(
+            f"  [red]stopped[/] at {done}/{len(pending)} files on HTTP"
+            f" {error.response.status_code}, rerun to resume with fresh links"
+        )
+        raise typer.Exit(1) from error
+    console.print(f"  {'files':<10} [green]+{done} new[/]{note}")
 
 
 def _report_upsert(label: str, result: store.Upserted) -> None:

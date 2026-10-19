@@ -16,6 +16,7 @@ from trinolio import push, store, upload, wellness
 def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("TRAININGS", "METRICS", "WELLNESS"):
         monkeypatch.setattr(store, name, tmp_path / f"{name.lower()}.parquet")
+    monkeypatch.setattr(store, "FILES", tmp_path / "files")
     monkeypatch.setattr(push, "PUSHED", tmp_path / "pushed.jsonl")
     monkeypatch.setattr(upload, "UPLOADED", tmp_path / "uploaded.jsonl")
     # Read-only, but pointed away all the same: a test asserting on row counts would

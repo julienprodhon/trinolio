@@ -14,7 +14,7 @@ the `.env` is itself one of the things being located:
 | Variable | Default | What it points at |
 | --- | --- | --- |
 | `TRINOLIO_ENV` | nearest `.env` walking up from the cwd | Credentials and the rotating tokens. |
-| `TRINOLIO_DATA` | `data/` beside a source checkout, else `./data` | The parquet warehouse. |
+| `TRINOLIO_DATA` | `data/` beside a source checkout, else `./data` | The parquet warehouse, and each workout's original file under `files/`. |
 | `TRINOLIO_ARCHIVE` | `data-archive/wellness/` beside a checkout, else `./data-archive/wellness` | A Garmin wellness export, read by `wellness`. |
 
 The checkout defaults are what keep a `pip install`ed copy from writing its warehouse into
@@ -59,8 +59,9 @@ in the map by inference from the localized string, and id 18 is "Virtual ride" i
 the app serves "Vélo - Home Trainer", so a plain non-virtual turbo session lands there too.
 
 `date_end` is empty on every workout, so its parse format has to be given explicitly rather than
-inferred. `file_url` on a workout is a CDN link that expires within the hour, so `sync` drops it
-instead of storing a column that would churn every row on every sync while never being usable.
+inferred. `file_url` on a workout is a link that expires within the hour, so `sync` downloads
+the file instead of storing a column that would churn every row while never being usable. See
+original files below.
 
 `/get/user/meta/` is the only usable metrics listing endpoint, since `/get/metric/` needs an id.
 One request returns every type at once, and it serves 14 where the wiki documents 4: `sleep`,
@@ -144,6 +145,20 @@ The consequence for any query spanning years: every bucket was measured against 
 zone settings were at the time, and Nolio does not recompute history when they change. Time in
 zone is not comparable across a settings change, and there is no way to detect one from the
 stored buckets alone.
+
+## Original files
+
+Every workout `/get/training/` lists carries `file_url`, pointing at `private.cdn.nolio.io` rather
+than the API, so a download costs no API request. Across one account's 2019-2026 history (checked
+2026-10-19):
+
+- 2257 of 2262 workouts have a file. The other 5 are entries with nothing recorded.
+- The file is the original upload: the device's FIT, or a GPX where that is what went in through
+  the web UI. Nolio keeps the full Garmin file, including the channels Strava strips from its
+  copy.
+- The suffix in the URL is unreliable: one listing has served `.gzip` links for workouts the next
+  served as `.fit`. `files.decoded` reads the content instead.
+- Downloading the whole history, 236 MB, takes about 45 minutes, one time only.
 
 ## Streams
 
