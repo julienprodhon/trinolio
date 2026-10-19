@@ -46,6 +46,19 @@ def test_zones_survive_as_json_and_default_to_empty() -> None:
     assert frame.filter(pl.col("nolio_id") == 2)["zones"].item() == "{}"
 
 
+def test_zones_serialize_the_same_whatever_order_the_channels_arrive_in() -> None:
+    heartrate = [{"min": 0, "max": 131, "duration": 60}]
+    watts = [{"min": 0, "max": 99, "duration": 60}]
+    frame = store.trainings_frame(
+        [
+            training(nolio_id=1, zones={"heartrate": heartrate, "watts": watts}),
+            training(nolio_id=2, zones={"watts": watts, "heartrate": heartrate}),
+        ]
+    )
+
+    assert frame["zones"].n_unique() == 1
+
+
 def test_start_local_needs_both_halves_of_the_wall_clock() -> None:
     """Date and hour are stored separately and are local time, not UTC. A workout Nolio
     gave no hour for gets a null rather than a midnight that was never recorded."""
@@ -104,13 +117,63 @@ def test_upsert_replaces_the_refetched_window_and_keeps_the_rest() -> None:
     )
 
     fresh = store.trainings_frame([training(nolio_id=2, rpe=7), training(nolio_id=3)])
-    added, updated = store.upsert(store.TRAININGS, fresh, key="nolio_id", sort="date_start")
+    result = store.upsert(store.TRAININGS, fresh, key="nolio_id", sort="date_start")
 
     stored = pl.read_parquet(store.TRAININGS)
-    assert (added, updated) == (1, 1)
+    assert (result.added, result.changed, result.unchanged) == (1, 1, 0)
+    assert result.changed_columns == ["rpe"]
     assert stored.height == 3
     assert stored.filter(pl.col("nolio_id") == 2)["rpe"].item() == 7
     assert stored["date_start"].is_sorted()
+
+
+def test_upsert_counts_an_identical_refetch_as_unchanged_and_leaves_the_file_alone() -> None:
+    workouts = store.trainings_frame([training(nolio_id=1), training(nolio_id=2, rpe=None)])
+    store.write(store.TRAININGS, workouts)
+    written = store.TRAININGS.stat().st_mtime_ns
+
+    result = store.upsert(store.TRAININGS, workouts, key="nolio_id", sort="date_start")
+
+    assert (result.added, result.changed, result.unchanged) == (0, 0, 2)
+    assert store.TRAININGS.stat().st_mtime_ns == written
+
+
+def test_upsert_drops_mirrored_rows_the_fetch_no_longer_returns() -> None:
+    """A workout inside the refetched window that Nolio stopped returning was deleted there.
+    Rows before the window were not asked for, so they stay."""
+    store.write(
+        store.TRAININGS,
+        store.trainings_frame(
+            [
+                training(nolio_id=1, date_start="2026-01-01"),
+                training(nolio_id=2, date_start="2026-02-01"),
+                training(nolio_id=3, date_start="2026-02-02"),
+            ]
+        ),
+    )
+
+    fresh = store.trainings_frame([training(nolio_id=3, date_start="2026-02-02")])
+    result = store.upsert(
+        store.TRAININGS,
+        fresh,
+        key="nolio_id",
+        sort="date_start",
+        mirrored=pl.col("date_start") >= date(2026, 1, 15),
+    )
+
+    assert result.removed["nolio_id"].to_list() == [2]
+    assert pl.read_parquet(store.TRAININGS)["nolio_id"].to_list() == [1, 3]
+
+
+def test_upsert_keeps_unfetched_rows_when_nothing_is_mirrored() -> None:
+    store.write(store.TRAININGS, store.trainings_frame([training(nolio_id=1)]))
+
+    result = store.upsert(
+        store.TRAININGS, store.trainings_frame([training(nolio_id=2)]), "nolio_id", "date_start"
+    )
+
+    assert result.removed.height == 0
+    assert pl.read_parquet(store.TRAININGS).height == 2
 
 
 def test_write_leaves_no_temporary_behind() -> None:

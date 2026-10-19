@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -327,6 +327,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "polars" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -343,6 +344,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "polars", specifier = ">=1.43.0" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "typer", specifier = ">=0.27.0" },
 ]
 

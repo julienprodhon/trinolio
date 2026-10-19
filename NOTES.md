@@ -127,7 +127,9 @@ with existing workouts unless told to.
 
 ## Zones
 
-The `zones` payload carries only `min`, `max` and `duration` per bucket. There is no zone index,
+The `zones` payload carries only `min`, `max` and `duration` per bucket, and the order of its
+channels varies between two calls for the same workout, which is why `store` serializes it with
+sorted keys. There is no zone index,
 which is why `data.ladder()` derives the ordinal by dense-ranking each channel's distinct floors
 rather than declaring one. Boundaries are the athlete's own settings, mutable and owned by them,
 so a constant in the library would freeze one account's configuration into it.
@@ -150,8 +152,8 @@ which is what any future stream support should be built on:
 
 - Streams exist for the whole history, including a 2019 workout and a GPX backfill. No 204s.
 - Channels are `heartrate`, `watts`, `cadence`, `torque`, `pace`, `altitude`, `distance`, `time`,
-  plus `file_url` and `custom_laps`. No GPS coordinates, no temperature, no running dynamics:
-  those only exist in the original FIT.
+  plus `file_url` and `custom_laps`. No GPS coordinates on this route (see `/get/training/info/`
+  below), and no temperature or running dynamics on either: those only exist in the original FIT.
 - The wiki's claim that all arrays share one length and index is false. One swim returned 1701
   `heartrate` and `time` samples against 1680 for `cadence`, `pace` and `distance`. Do not zip
   blindly.
@@ -169,6 +171,14 @@ which is what any future stream support should be built on:
   warehouse. It needs a storage shape decision before a full backfill, not after.
 - One request per workout at ~200/hour puts a full history in the order of ten hours of
   trickling, the same shape as `push-metrics`.
+
+`/get/training/info/` serves the same samples with more around them. Probed on one outdoor run
+(2026-10-18, 1502 samples): every channel `/get/training/streams/` returned was identical value
+for value, and it added `gps` as `[lat, lng]` on every sample, 14 device laps with stream indices,
+and tags. It sends one object per sample with its own `time`, so the channels cannot drift out of
+alignment, at about three times the JSON size (251 KB against 77 KB). So the API does carry GPS,
+through this route only. On the same run `time` repeats at the five auto-pauses, where cadence
+drops to 0 and `pace` is null.
 
 ## Other things Nolio does
 

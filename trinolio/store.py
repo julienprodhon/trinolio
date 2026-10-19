@@ -11,7 +11,7 @@ import os
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 import polars as pl
 
@@ -132,7 +132,8 @@ def trainings_frame(records: Sequence[Mapping[str, Any]]) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     for record in records:
         row = {key: record.get(key) for key in TRAININGS_RAW}
-        row["zones"] = json.dumps(record.get("zones") or {})
+        # Nolio orders the channels differently from one call to the next
+        row["zones"] = json.dumps(record.get("zones") or {}, sort_keys=True)
         rows.append(row)
     return pl.DataFrame(rows, schema=TRAININGS_RAW, strict=False).with_columns(
         pl.col("date_start").str.to_date("%Y-%m-%d"),
@@ -243,15 +244,50 @@ def duplicate_candidates(
     )
 
 
-def upsert(path: Path, fresh: pl.DataFrame, key: str, sort: str) -> tuple[int, int]:
-    """Replace stored rows that were refetched, keep the rest. Returns (added, updated)."""
-    added, updated = fresh.height, 0
-    merged = fresh
-    if path.exists():
-        stored = pl.read_parquet(path)
-        kept = stored.join(fresh.select(key), on=key, how="anti")
-        merged = pl.concat([kept, fresh], how="vertical")
-        added = merged.height - stored.height
-        updated = fresh.height - added
-    write(path, merged.sort(sort))
-    return added, updated
+class Upserted(NamedTuple):
+    added: int
+    changed: int
+    unchanged: int
+    changed_columns: list[str]
+    removed: pl.DataFrame
+
+
+def differing_columns(stored: pl.DataFrame, fresh: pl.DataFrame, key: str) -> list[str]:
+    """The columns where at least one stored row disagrees with its refetched version."""
+    paired = stored.join(fresh, on=key, suffix="_fresh")
+    return [
+        column
+        for column in stored.columns
+        if column != key and not paired[column].eq_missing(paired[f"{column}_fresh"]).all()
+    ]
+
+
+def upsert(
+    path: Path, fresh: pl.DataFrame, key: str, sort: str, mirrored: pl.Expr | None = None
+) -> Upserted:
+    """Replace stored rows that were refetched, keep the rest, write only if anything moved.
+
+    `mirrored` selects the stored rows the fetch was complete for: any of them it did not
+    return was deleted upstream, and is dropped.
+    """
+    if not path.exists():
+        write(path, fresh.sort(sort))
+        return Upserted(fresh.height, 0, 0, [], fresh.clear())
+
+    stored = pl.read_parquet(path)
+    refetched = stored.join(fresh.select(key), on=key, how="semi")
+    unchanged = refetched.join(fresh, on=fresh.columns, how="semi", nulls_equal=True)
+    changed = refetched.join(unchanged.select(key), on=key, how="anti")
+    removed = (
+        stored.filter(mirrored).join(fresh.select(key), on=key, how="anti")
+        if mirrored is not None
+        else stored.clear()
+    )
+    added = fresh.height - refetched.height
+
+    if added or changed.height or removed.height:
+        kept = stored.join(pl.concat([fresh.select(key), removed.select(key)]), on=key, how="anti")
+        write(path, pl.concat([kept, fresh], how="vertical").sort(sort))
+    return Upserted(
+        added, changed.height, unchanged.height, differing_columns(changed, fresh, key), removed
+    )

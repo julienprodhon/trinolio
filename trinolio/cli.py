@@ -2,15 +2,23 @@
 
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from collections.abc import Iterable
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import polars as pl
 import typer
+from rich.console import Console
+from rich.markup import escape
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
+from rich.table import Table
 
 from trinolio import auth, metrics, push, store, upload
 from trinolio.trainings import fetch_trainings
 from trinolio.wellness import read_archive
+
+console = Console(highlight=False)
 
 # Markdown mode so the help text reflows: rich otherwise keeps the docstring's own line breaks.
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="markdown")
@@ -51,8 +59,9 @@ def sync(
 
     Refetches a trailing window rather than only what is new, because RPE and descriptions get
     filled in after the session and Nolio recomputes load when FTP or weight change. Rows upsert
-    on `nolio_id`, so re-running is idempotent; a workout deleted in Nolio only disappears on
-    `--full`.
+    on `nolio_id`, so re-running is idempotent, and only rows whose content moved count as
+    changed. A stored workout inside the window that Nolio no longer returns was deleted there,
+    and is dropped and listed; `--full` does the same over the whole history.
 
     It also reports workouts of the same sport that start within five minutes of each other and
     agree on duration and distance, the shape Nolio's own deduplication misses. They are only
@@ -68,23 +77,49 @@ def sync(
         since = (stored - timedelta(days=lookback)).strftime("%Y-%m-%d") if stored else None
 
     window = f"from {since}" if since else "full history"
-    print(f"syncing {window}")
+    console.print(f"[bold]sync[/] [dim]{window}[/]")
 
     workouts = fetch_trainings(since)
-    added, updated = store.upsert(
-        store.TRAININGS, store.trainings_frame(workouts), key="nolio_id", sort="date_start"
+    window_start = pl.col("date_start") >= date.fromisoformat(since) if since else pl.lit(True)
+    trainings = store.upsert(
+        store.TRAININGS,
+        store.trainings_frame(workouts),
+        key="nolio_id",
+        sort="date_start",
+        mirrored=window_start,
     )
-    print(f"  trainings  {added:>4} new  {updated:>4} updated  ->  {store.TRAININGS}")
+    _report_upsert("trainings", trainings)
+    for day, nolio_id, name in trainings.removed.select(
+        "date_start", "nolio_id", "name"
+    ).iter_rows():
+        console.print(f"    [red]deleted in Nolio[/] {day}  {nolio_id}  {escape(name or '')}")
 
+    # Not mirrored: the per-type row cap truncates silently, so a missing metric may just be
+    # one the response had no room for.
     points = metrics.fetch_metrics(since)
-    added, updated = store.upsert(store.METRICS, store.metrics_frame(points), key="id", sort="date")
-    print(f"  metrics    {added:>4} new  {updated:>4} updated  ->  {store.METRICS}")
+    _report_upsert(
+        "metrics", store.upsert(store.METRICS, store.metrics_frame(points), key="id", sort="date")
+    )
 
     capped = [name for name, n in Counter(p["type"] for p in points).items() if n >= metrics.LIMIT]
     if capped:
-        print(
-            f"  warning: {', '.join(capped)} hit the {metrics.LIMIT} row cap, sync a shorter range"
+        console.print(
+            f"  [yellow]warning[/] {', '.join(capped)} hit the {metrics.LIMIT} row cap,"
+            " sync a shorter range"
         )
+
+
+def _report_upsert(label: str, result: store.Upserted) -> None:
+    parts = []
+    if result.added:
+        parts.append(f"[green]+{result.added} new[/]")
+    if result.changed:
+        parts.append(
+            f"[yellow]~{result.changed} changed[/] [dim]{', '.join(result.changed_columns)}[/]"
+        )
+    if result.removed.height:
+        parts.append(f"[red]-{result.removed.height} removed[/]")
+    console.print(f"  {label:<10} {'  '.join(parts) or '[dim]up to date[/]'}")
 
 
 @app.command()
@@ -92,10 +127,11 @@ def wellness() -> None:
     """Rebuild the local wellness table from the Garmin archive. No network, rerunnable."""
     frame = store.wellness_frame(read_archive())
     store.write(store.WELLNESS, frame)
-    print(f"wellness  {frame.height} rows  {frame['date'].min()} to {frame['date'].max()}")
-    for metric_type, rows in frame.group_by("type").len().sort("type").iter_rows():
-        print(f"  {metric_type:<18} {rows:>5}")
-    print(f"  ->  {store.WELLNESS}")
+    console.print(
+        f"[bold]wellness[/] {frame.height} rows"
+        f" [dim]{frame['date'].min()} to {frame['date'].max()}[/]"
+    )
+    _print_counts(frame.group_by("type").len().sort("type").iter_rows())
 
 
 @app.command("push-metrics")
@@ -130,35 +166,35 @@ def push_metrics(
         todo = todo.head(limit)
 
     already = push.sent().height
-    print(f"pushing {todo.height} values before {cutoff}, {already} already sent")
+    console.print(
+        f"[bold]push-metrics[/] {todo.height} values before {cutoff} [dim]{already} already sent[/]"
+    )
     if not todo.height:
         return
     hours = todo.height * interval / 3600
-    print(f"  {todo['date'].min()} to {todo['date'].max()}, about {hours:.1f}h at {interval}s each")
+    console.print(
+        f"  [dim]{todo['date'].min()} to {todo['date'].max()},"
+        f" about {hours:.1f}h at {interval}s each[/]"
+    )
     if dry_run:
-        for metric_type, rows in todo.group_by("type").len().sort("type").iter_rows():
-            print(f"  {metric_type:<18} {rows:>5}")
+        _print_counts(todo.group_by("type").len().sort("type").iter_rows())
         return
 
     done = 0
-    started = time.monotonic()
     try:
-        for row in todo.iter_rows(named=True):
-            if done:
-                time.sleep(interval)
-            nolio_id = push.send(row["type"], row["value"], row["date"])
-            push.mark_sent(row["type"], row["date"], nolio_id)
-            done += 1
-            if done % 25 == 0 or done == todo.height:
-                left = (todo.height - done) * (time.monotonic() - started) / done / 3600
-                print(f"  {done}/{todo.height}  {row['type']} {row['date']}  ~{left:.1f}h left")
+        with _progress() as progress:
+            task = progress.add_task("", total=todo.height)
+            for row in todo.iter_rows(named=True):
+                if done:
+                    time.sleep(interval)
+                nolio_id = push.send(row["type"], row["value"], row["date"])
+                push.mark_sent(row["type"], row["date"], nolio_id)
+                done += 1
+                progress.update(task, advance=1, description=f"{row['type']} {row['date']}")
     except KeyboardInterrupt:
-        print(f"\nstopped at {done}/{todo.height}, rerun to resume")
+        console.print(f"[yellow]stopped[/] at {done}/{todo.height}, rerun to resume")
     except httpx.HTTPStatusError as error:
-        status = error.response.status_code
-        rate_limited = status == httpx.codes.TOO_MANY_REQUESTS
-        reason = "rate limited, wait an hour" if rate_limited else error.response.text[:200]
-        print(f"\nstopped at {done}/{todo.height} on HTTP {status}: {reason}")
+        _report_http_stop(error, done, todo.height)
         raise typer.Exit(1) from error
 
 
@@ -167,11 +203,13 @@ def athletes() -> None:
     """List the athletes this token manages, with the id the other commands take."""
     managed = upload.athletes()
     if not managed:
-        print("no managed athletes on this account")
+        console.print("[dim]no managed athletes on this account[/]")
         return
+    table = Table("id", "name", "teams", box=None, header_style="dim")
     for athlete in managed:
         teams = ", ".join(team["name"] for team in athlete["teams"]) or "-"
-        print(f"  {athlete['nolio_id']:>8}  {athlete['name']:<30} {teams}")
+        table.add_row(str(athlete["nolio_id"]), escape(athlete["name"]), escape(teams))
+    console.print(table)
 
 
 @app.command("push-trainings")
@@ -202,7 +240,10 @@ def push_trainings(
     """
     found, unsupported = upload.scan(paths)
     todo = upload.pending(found)
-    print(f"{len(found)} activities found, {len(found) - len(todo)} already uploaded")
+    console.print(
+        f"[bold]push-trainings[/] {len(found)} activities"
+        f" [dim]{len(found) - len(todo)} already uploaded[/]"
+    )
     _report_unsupported(unsupported)
     if not todo:
         return
@@ -211,10 +252,10 @@ def push_trainings(
 
     if limit:
         todo = todo[:limit]
-    print(f"  uploading {len(todo)}, about {len(todo) * interval / 3600:.1f}h at {interval}s each")
+    hours = len(todo) * interval / 3600
+    console.print(f"  uploading {len(todo)} [dim]about {hours:.1f}h at {interval}s each[/]")
     if dry_run:
-        for kind, n in sorted(Counter(activity["format"] for activity in todo).items()):
-            print(f"  {kind:<6} {n:>5}")
+        _print_counts(sorted(Counter(activity["format"] for activity in todo).items()))
         return
 
     _trickle(todo, athlete_id, interval)
@@ -227,9 +268,13 @@ def _report_unsupported(unsupported: list[Path]) -> None:
     # JSON and the zips, and only the extension tells those from a real workout.
     formats = Counter(path.suffix.lower() for path in unsupported)
     listed = ", ".join(f"{n} {suffix}" for suffix, n in sorted(formats.items()))
-    print(f"  skipping {len(unsupported)} the endpoint cannot take ({listed})")
+    console.print(
+        f"  [yellow]skipping {len(unsupported)}[/] the endpoint cannot take [dim]{listed}[/]"
+    )
     if gpx := formats.get(".gpx"):
-        print(f"    {gpx} of those are workouts: upload them by hand, the Nolio UI takes GPX")
+        console.print(
+            f"    {gpx} of those are workouts: upload them by hand, the Nolio UI takes GPX"
+        )
 
 
 def _refuse_if_nolio_has_history(athlete_id: int | None) -> None:
@@ -239,43 +284,75 @@ def _refuse_if_nolio_has_history(athlete_id: int | None) -> None:
         return
     first, last = held
     whose = f"athlete {athlete_id}" if athlete_id else "your account"
-    print(f"\nrefusing: Nolio already holds workouts for {whose}, {first} to {last}")
-    print("  a connector-synced session has no id_partner, so uploading over that range")
-    print("  duplicates it, and Nolio has no delete route. Scope the paths to the years")
-    print("  before it, or pass --overlap.")
+    console.print(
+        f"[bold red]refusing[/] Nolio already holds workouts for {whose}, {first} to {last}"
+    )
+    console.print(
+        "  A connector-synced session has no id_partner, so uploading over that range duplicates"
+        " it, and Nolio has no delete route. Scope the paths to the years before it, or pass"
+        " --overlap.",
+        style="dim",
+    )
     raise typer.Exit(1)
 
 
 def _trickle(todo: list[upload.Activity], athlete_id: int | None, interval: float) -> None:
     done, imported = 0, 0
-    started = time.monotonic()
     try:
-        for activity in todo:
-            if done:
-                time.sleep(interval)
-            path = activity["path"]
-            accepted = upload.send(
-                upload.read_activity(path), activity["format"], activity["id_partner"], athlete_id
-            )
-            upload.mark_uploaded(activity["id_partner"], path, athlete_id)
-            done += 1
-            imported += accepted
-            if done % 25 == 0 or done == len(todo):
-                left = (len(todo) - done) * (time.monotonic() - started) / done / 3600
-                print(f"  {done}/{len(todo)}  {path.name}  ~{left:.1f}h left")
+        with _progress() as progress:
+            task = progress.add_task("", total=len(todo))
+            for activity in todo:
+                if done:
+                    time.sleep(interval)
+                path = activity["path"]
+                accepted = upload.send(
+                    upload.read_activity(path),
+                    activity["format"],
+                    activity["id_partner"],
+                    athlete_id,
+                )
+                upload.mark_uploaded(activity["id_partner"], path, athlete_id)
+                done += 1
+                imported += accepted
+                progress.update(task, advance=1, description=escape(path.name))
     except KeyboardInterrupt:
-        print(f"\nstopped at {done}/{len(todo)}, rerun to resume")
+        console.print(f"[yellow]stopped[/] at {done}/{len(todo)}, rerun to resume")
         return
     except httpx.HTTPStatusError as error:
-        status = error.response.status_code
-        rate_limited = status == httpx.codes.TOO_MANY_REQUESTS
-        reason = "rate limited, wait an hour" if rate_limited else error.response.text[:200]
-        print(f"\nstopped at {done}/{len(todo)} on HTTP {status}: {reason}")
+        _report_http_stop(error, done, len(todo))
         raise typer.Exit(1) from error
 
     # Accepted means queued, not landed, so the count Nolio ends up with is the one that counts.
-    print(f"  {imported} accepted, {done - imported} Nolio already had")
-    print("  run `trinolio sync --full` and reconcile the counts: uploads are processed async")
+    console.print(f"  [green]{imported} accepted[/] [dim]{done - imported} Nolio already had[/]")
+    console.print(
+        "  [dim]run `trinolio sync --full` and reconcile the counts: uploads are processed async[/]"
+    )
+
+
+def _progress() -> Progress:
+    return Progress(
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.description}[/]"),
+        console=console,
+    )
+
+
+def _report_http_stop(error: httpx.HTTPStatusError, done: int, total: int) -> None:
+    status = error.response.status_code
+    rate_limited = status == httpx.codes.TOO_MANY_REQUESTS
+    reason = "rate limited, wait an hour" if rate_limited else escape(error.response.text[:200])
+    console.print(f"[red]stopped[/] at {done}/{total} on HTTP {status}: {reason}")
+
+
+def _print_counts(rows: Iterable[tuple[str, int]]) -> None:
+    table = Table(box=None, show_header=False, padding=(0, 1, 0, 2))
+    table.add_column()
+    table.add_column(justify="right")
+    for name, n in rows:
+        table.add_row(name, str(n))
+    console.print(table)
 
 
 if __name__ == "__main__":
