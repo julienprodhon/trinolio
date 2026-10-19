@@ -8,7 +8,7 @@ missing heart rate. Garmin's undocumented `unknown_*` fields are skipped.
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import fitdecode
 import polars as pl
@@ -111,17 +111,20 @@ def parse(path: Path, workout: Workout) -> Parsed:
                         unlisted.add(field.name)
                 rows.append(row)
             elif frame.name == "session":
+                # fitdecode is untyped, so the FIT profile's types are restated here
                 sessions.append(
                     Session(
-                        frame.get_value("start_time"),
-                        frame.get_value("timestamp"),
-                        frame.get_value("total_timer_time"),
+                        cast("datetime", frame.get_value("start_time")),
+                        cast("datetime", frame.get_value("timestamp")),
+                        cast("float", frame.get_value("total_timer_time")),
                     )
                 )
             elif frame.name == "activity":
                 local = frame.get_value("local_timestamp", fallback=None)
                 if local is not None:
-                    offset = local - frame.get_value("timestamp")
+                    offset = cast("datetime", local) - cast(
+                        "datetime", frame.get_value("timestamp")
+                    )
 
     samples = pl.DataFrame(rows, schema=SCHEMA, strict=False).with_columns(
         nolio_id=pl.lit(workout.nolio_id, pl.Int64)

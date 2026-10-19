@@ -66,7 +66,7 @@ def save_tokens(tokens: dict[str, Any]) -> str:
     }
     save_env(**fresh)
     os.environ.update(fresh)
-    return tokens["access_token"]
+    return str(tokens["access_token"])
 
 
 def auth_url() -> str:

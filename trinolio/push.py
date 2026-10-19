@@ -72,7 +72,7 @@ def send(metric_type: str, value: float, day: date) -> int:
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()["metric_id"]
+    return int(response.json()["metric_id"])
 
 
 def mark_sent(metric_type: str, day: date, nolio_id: int) -> None:
