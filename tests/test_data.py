@@ -5,7 +5,7 @@ from typing import Any
 import polars as pl
 import pytest
 
-from trinolio import data, store
+from trinolio import data, store, streams
 
 
 def training(**overrides: object) -> dict[str, Any]:
@@ -247,3 +247,56 @@ def test_a_ladder_that_only_grows_a_bucket_is_not_an_overlap() -> None:
     )
 
     assert data.zones()["zone"].max() == 4
+
+
+def store_streams(rows: dict[str, list[Any]]) -> None:
+    samples = pl.DataFrame(rows).with_columns(pl.col("timestamp").str.to_datetime(time_zone="UTC"))
+    store.write(
+        store.STREAMS, pl.concat([streams.SCHEMA.to_frame(), samples], how="diagonal_relaxed")
+    )
+
+
+def test_streams_undo_the_fit_encodings() -> None:
+    store_trainings([training(nolio_id=1, sport_id=2), training(nolio_id=2, sport_id=14)])
+    store_streams(
+        {
+            "nolio_id": [1, 2],
+            "timestamp": ["2026-01-02T00:00:00", "2026-01-02T01:00:00"],
+            "position_lat": [2**30, -(2**30)],
+            "speed": [3.0, 9.0],
+            "enhanced_speed": [None, 8.0],
+            "cadence": [88, 90],
+            "fractional_cadence": [0.5, None],
+            "heart_rate": [150, 0],
+        }
+    )
+
+    run, ride = data.streams().sort("nolio_id").collect().iter_rows(named=True)
+
+    assert (run["latitude"], ride["latitude"]) == (90.0, -90.0)
+    assert (run["speed"], ride["speed"]) == (3.0, 8.0)
+    # FIT counts one leg on a run, both on a ride
+    assert (run["cadence"], ride["cadence"]) == (177.0, 90.0)
+    assert (run["heart_rate"], ride["heart_rate"]) == (150, None)
+
+
+def test_stream_time_and_distance_count_from_each_workouts_first_sample() -> None:
+    store_trainings([training(nolio_id=1), training(nolio_id=2)])
+    # The second workout is a race leg, its file counting on from the leg before
+    store_streams(
+        {
+            "nolio_id": [1, 1, 2, 2],
+            "timestamp": [
+                "2026-01-02T00:00:00",
+                "2026-01-02T00:00:05",
+                "2026-01-02T01:00:00",
+                "2026-01-02T01:00:10",
+            ],
+            "distance": [0.0, 20.0, 1500.0, 1530.0],
+        }
+    )
+
+    samples = data.streams().sort("nolio_id", "timestamp").collect()
+
+    assert samples["elapsed"].to_list() == [0, 5, 0, 10]
+    assert samples["distance"].to_list() == [0.0, 20.0, 0.0, 30.0]

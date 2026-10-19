@@ -35,6 +35,7 @@ METRICS = DATA / "metrics.parquet"
 WELLNESS = DATA / "wellness.parquet"
 # One original activity file per workout, named by `nolio_id`
 FILES = DATA / "files"
+STREAMS = DATA / "streams.parquet"
 
 # Wide enough for two uploads of one ride disagree by, short enough that a brick falls outside
 DUPLICATE_WINDOW = timedelta(minutes=5)

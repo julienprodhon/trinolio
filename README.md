@@ -42,7 +42,7 @@ trinolio exchange CODE
 ## Getting started
 
 ```sh
-trinolio sync            # pull workouts and wellness metrics into data/
+trinolio sync            # pull workouts, their original files and wellness into data/
 ```
 
 ```python
@@ -61,7 +61,7 @@ Always read through `trinolio.data` rather than the parquet directly. Nolio writ
 | Command | |
 | --- | --- |
 | `auth-url`, `exchange`, `token` | Authorise once, then let it refresh itself. |
-| `sync` | Pull workouts and wellness metrics into the local parquet files. |
+| `sync` | Pull workouts, their original files and samples, and wellness metrics into local parquet. |
 | `athletes` | List the athletes you coach, with their ids. |
 | `wellness` | Rebuild `wellness.parquet` from a Garmin export. |
 | `push-metrics` | Trickle archive wellness up into Nolio. |
@@ -91,9 +91,14 @@ takes only FIT and TCX even though the web UI accepts GPX by hand.
 data.trainings()   # one row per workout, unrecorded values as null
 data.wellness()    # your export and Nolio's connector as one series
 data.zones()       # time in zone, long: nolio_id, date_start, sport_id, channel, min, max, duration, zone
+data.streams()     # per-second samples from each original file, lazy: filter, then .collect()
 ```
 
-Each has a docstring covering what it decodes and what to watch out for. Units are Nolio's own, unconverted: `distance` in kilometres, `elevation_*` in metres, `duration` in seconds. `date_start` and `hour_start` are your local wall clock rather than UTC.
+The first `sync` downloads every workout's original file and parses it, which takes the better
+part of an hour for a long history and is resumable. After that, each sync handles only the new
+workouts. `trinolio sync --full` fetches files for any older workout still missing one.
+
+Each has a docstring covering what it decodes and what to watch out for. Units are Nolio's own, unconverted (streams are SI, metres and m/s, as FIT records them): `distance` in kilometres, `elevation_*` in metres, `duration` in seconds. `date_start` and `hour_start` are your local wall clock rather than UTC.
 
 The module holds facts about how Nolio encodes things, not analysis. A weekly load or a fitness curve is a question, and questions belong in a notebook. `trinolio.store` exposes the raw paths and schemas if you want the file untouched.
 

@@ -158,12 +158,18 @@ than the API, so a download costs no API request. Across one account's 2019-2026
   copy.
 - The suffix in the URL is unreliable: one listing has served `.gzip` links for workouts the next
   served as `.fit`. `files.decoded` reads the content instead.
-- Downloading the whole history, 236 MB, takes about 45 minutes, one time only.
+- A multisport race is one FIT holding each leg as a `session`, and every leg's `file_url` serves
+  that whole file, transitions included. `streams.parse` keeps the session whose start and
+  duration match the leg. Nolio's logged start trails the watch's by a few seconds, so the match
+  allows 60. The race file's `distance` keeps counting across legs.
+- 2243 FIT files hold 3.45M `record` samples: 236 MB of files and 59 MB as `streams.parquet`.
+  Downloading everything takes about 45 minutes and parsing it about 10, both one time only.
 
 ## Streams
 
-`/get/training/streams/` is not fetched by `sync`. Probed on five workouts spanning the history,
-which is what any future stream support should be built on:
+`sync` reads samples from the original FIT rather than `/get/training/streams/`: the file has
+every channel the route serves plus GPS, temperature, respiration and pedal dynamics, and costs no
+request. Probed on five workouts spanning the history, for anyone using the route:
 
 - Streams exist for the whole history, including a 2019 workout and a GPX backfill. No 204s.
 - Channels are `heartrate`, `watts`, `cadence`, `torque`, `pace`, `altitude`, `distance`, `time`,
@@ -181,11 +187,7 @@ which is what any future stream support should be built on:
   `heartrate` and `watts`, so pace zones are reachable this way and only this way.
 - Swim `stream_distance` is per lap (25.0 repeated, the pool length), not cumulative. Run and
   ride are cumulative and consistent with their speed traces.
-- Payloads run 26 KB to 519 KB at roughly 1 Hz. Against ~2250 recorded hours that is on the
-  order of 8M samples, perhaps 30 to 60 MB as parquet, two orders of magnitude past the current
-  warehouse. It needs a storage shape decision before a full backfill, not after.
-- One request per workout at ~200/hour puts a full history in the order of ten hours of
-  trickling, the same shape as `push-metrics`.
+- Payloads run 26 KB to 519 KB at roughly 1 Hz, one request per workout.
 
 `/get/training/info/` serves the same samples with more around them. Probed on one outdoor run
 (2026-10-18, 1502 samples): every channel `/get/training/streams/` returned was identical value

@@ -14,7 +14,7 @@ from trinolio import push, store, upload, wellness
 
 @pytest.fixture(autouse=True)
 def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for name in ("TRAININGS", "METRICS", "WELLNESS"):
+    for name in ("TRAININGS", "METRICS", "WELLNESS", "STREAMS"):
         monkeypatch.setattr(store, name, tmp_path / f"{name.lower()}.parquet")
     monkeypatch.setattr(store, "FILES", tmp_path / "files")
     monkeypatch.setattr(push, "PUSHED", tmp_path / "pushed.jsonl")

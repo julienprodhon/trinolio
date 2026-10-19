@@ -145,6 +145,9 @@ METRIC_NAMES = {
     "weight": "weight",
 }
 
+# FIT stores positions as 32-bit fractions of a half turn
+SEMICIRCLE_DEGREES = 180 / 2**31
+
 ZONE_ROWS = pl.Schema(
     {
         "nolio_id": pl.Int64,
@@ -269,4 +272,43 @@ def zones() -> pl.DataFrame:
     parsed = pl.DataFrame(rows, schema=ZONE_ROWS, strict=False)
     return parsed.join(ladder(parsed), on=["channel", "min", "max"], how="left").sort(
         "date_start", "channel", "min"
+    )
+
+
+def streams() -> pl.LazyFrame:
+    """Every workout's per-second samples, lazy because they run to millions of rows.
+
+    Filter on `nolio_id` or `timestamp` before collecting. Positions are degrees in `latitude`
+    and `longitude`. `speed` and `altitude` take the enhanced field wherever the device wrote
+    one. `cadence` folds in `fractional_cadence` and is steps per minute on runs, where FIT
+    counts one leg. `heart_rate` 0, what Zwift records without a strap, is null. `elapsed` is
+    seconds since the workout's first sample, and `distance` starts from 0 on each workout,
+    since a race file counts on across its legs.
+    """
+    runs = [sport_id for sport_id, discipline in DISCIPLINE_BY_ID.items() if discipline == "run"]
+    sports = pl.scan_parquet(store.TRAININGS).select("nolio_id", "sport_id")
+    return (
+        pl.scan_parquet(store.STREAMS)
+        .join(sports, on="nolio_id", how="left")
+        .with_columns(
+            latitude=pl.col("position_lat") * SEMICIRCLE_DEGREES,
+            longitude=pl.col("position_long") * SEMICIRCLE_DEGREES,
+            speed=pl.coalesce("enhanced_speed", "speed"),
+            altitude=pl.coalesce("enhanced_altitude", "altitude"),
+            cadence=(pl.col("cadence") + pl.col("fractional_cadence").fill_null(0))
+            * pl.when(pl.col("sport_id").is_in(runs)).then(2).otherwise(1),
+            heart_rate=pl.col("heart_rate").replace(0, None),
+            distance=pl.col("distance") - pl.col("distance").min().over("nolio_id"),
+            elapsed=(
+                pl.col("timestamp") - pl.col("timestamp").min().over("nolio_id")
+            ).dt.total_seconds(),
+        )
+        .drop(
+            "position_lat",
+            "position_long",
+            "enhanced_speed",
+            "enhanced_altitude",
+            "fractional_cadence",
+            "sport_id",
+        )
     )

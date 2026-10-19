@@ -15,7 +15,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
-from trinolio import auth, files, metrics, push, store, upload
+from trinolio import auth, files, metrics, push, store, streams, upload
 from trinolio.trainings import fetch_trainings
 from trinolio.wellness import read_archive
 
@@ -64,8 +64,9 @@ def sync(
     changed. A stored workout inside the window that Nolio no longer returns was deleted there,
     and is dropped and listed; `--full` does the same over the whole history.
 
-    Each listed workout's original file is downloaded into `data/files/` once, resuming where an
-    interrupted run stopped.
+    Each listed workout's original file is downloaded into `data/files/` once, and the samples of
+    every FIT not parsed yet go into `streams.parquet`. Both resume where an interrupted run
+    stopped.
 
     It also reports workouts of the same sport that start within five minutes of each other and
     agree on duration and distance, the shape Nolio's own deduplication misses. They are only
@@ -99,6 +100,7 @@ def sync(
         console.print(f"    [red]deleted in Nolio[/] {day}  {nolio_id}  {escape(name or '')}")
     files.forget(trainings.removed["nolio_id"])
     _download_files(workouts)
+    _parse_streams()
 
     # Not mirrored: the per-type row cap truncates silently, so a missing metric may just be
     # one the response had no room for.
@@ -147,6 +149,39 @@ def _download_files(workouts: list[dict[str, Any]]) -> None:
         )
         raise typer.Exit(1) from error
     console.print(f"  {'files':<10} [green]+{done} new[/]{note}")
+
+
+def _parse_streams() -> None:
+    """Parse the samples of every downloaded FIT file not in the streams table yet."""
+    workouts = pl.read_parquet(store.TRAININGS, columns=["nolio_id", "start_local", "duration"])
+    existing = set(workouts["nolio_id"])
+    pending = streams.pending(streams.parsed_ids(), workouts)
+    parsed: list[pl.DataFrame] = []
+    unlisted: set[str] = set()
+    done = 0
+    try:
+        with _progress() as progress:
+            task = progress.add_task("", total=len(pending))
+            for path, workout in pending:
+                samples, fields = streams.parse(path, workout)
+                if samples.height:
+                    parsed.append(samples)
+                unlisted |= fields
+                done += 1
+                progress.update(task, advance=1, description=path.name)
+    except KeyboardInterrupt:
+        streams.save(parsed, existing)
+        console.print(f"  [yellow]stopped[/] at {done}/{len(pending)} files, rerun to resume")
+        raise typer.Exit(130) from None
+
+    dropped = streams.save(parsed, existing)
+    changes = [f"[green]+{len(parsed)} new[/]"] if parsed else []
+    changes += [f"[red]-{dropped} removed[/]"] if dropped else []
+    console.print(f"  {'streams':<10} {'  '.join(changes) or '[dim]up to date[/]'}")
+    if unlisted:
+        console.print(
+            f"  [yellow]warning[/] fields outside the streams schema: {', '.join(sorted(unlisted))}"
+        )
 
 
 def _report_upsert(label: str, result: store.Upserted) -> None:
