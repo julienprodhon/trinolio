@@ -361,7 +361,7 @@ wheels = [
 
 [[package]]
 name = "trinolio"
-version = "26.8"
+version = "26.10"
 source = { editable = "." }
 dependencies = [
     { name = "fitdecode" },

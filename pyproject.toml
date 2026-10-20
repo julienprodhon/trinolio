@@ -1,6 +1,6 @@
 [project]
 name = "trinolio"
-version = "26.8"
+version = "26.10"
 description = "Pull your Nolio triathlon training and wellness history into local parquet, and analyse it yourself"
 readme = "README.md"
 license = "Apache-2.0"
